@@ -4,7 +4,7 @@
     "port": 3000
   },
   "api_keys": [
-    "sk-your-secret-key-1"
+    "sk-your-secret-key-1",
     "sk-your-secret-key-2"
   ],
   "proxy": {

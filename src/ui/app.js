@@ -21,6 +21,8 @@
     oauth: { state: null, url: null },
   };
 
+  let oauthPollTimer = null;
+
   function setStatus(text, type = "info") {
     const prefix = type === "error" ? "❌ " : type === "success" ? "✅ " : "ℹ️ ";
     els.keyStatus.textContent = prefix + text;
@@ -173,7 +175,54 @@
     }
   }
 
+  function stopOAuthPolling() {
+    if (oauthPollTimer) {
+      clearInterval(oauthPollTimer);
+      oauthPollTimer = null;
+    }
+  }
+
+  async function pollOAuthStatusOnce() {
+    if (!state.oauth.state) return;
+    try {
+      const res = await apiFetch(`/admin/api/oauth/status/${encodeURIComponent(state.oauth.state)}`, {
+        method: "GET",
+      });
+      const data = res.data;
+      if (!data || !data.status) return;
+
+      if (data.status === "pending") {
+        setOAuthInfo({ status: "等待授权回调...", url: state.oauth.url, stateId: state.oauth.state });
+        return;
+      }
+
+      if (data.status === "expired") {
+        stopOAuthPolling();
+        setOAuthInfo({ status: `授权已过期：${data.message || ""}`, url: state.oauth.url, stateId: state.oauth.state });
+        return;
+      }
+
+      if (data.status === "completed") {
+        stopOAuthPolling();
+        if (data.success) {
+          setOAuthInfo({ status: `授权成功：${data.message || ""}`, url: state.oauth.url, stateId: state.oauth.state });
+          refreshAccounts();
+        } else {
+          setOAuthInfo({ status: `授权失败：${data.message || ""}`, url: state.oauth.url, stateId: state.oauth.state });
+        }
+      }
+    } catch (e) {
+      // keep polling silently
+    }
+  }
+
+  function startOAuthPolling() {
+    stopOAuthPolling();
+    oauthPollTimer = setInterval(pollOAuthStatusOnce, 2000);
+  }
+
   async function startOAuth() {
+    stopOAuthPolling();
     setOAuthInfo({ status: "生成授权链接中..." });
     try {
       const res = await apiFetch("/admin/api/oauth/start", { method: "POST", body: "{}" });
@@ -186,6 +235,8 @@
       if (!popup) {
         setOAuthInfo({ status: "弹窗被拦截，请手动点击链接打开", url: data.auth_url, stateId: data.state });
       }
+
+      startOAuthPolling();
     } catch (e) {
       if (e.status === 401) {
         setOAuthInfo({ status: "未授权：请先输入正确的 API Key" });
@@ -202,9 +253,11 @@
     if (state.oauth.state && data.state && data.state !== state.oauth.state) return;
 
     if (data.success) {
+      stopOAuthPolling();
       setOAuthInfo({ status: `授权成功：${data.message || ""}`, url: state.oauth.url, stateId: state.oauth.state });
       refreshAccounts();
     } else {
+      stopOAuthPolling();
       setOAuthInfo({ status: `授权失败：${data.message || ""}`, url: state.oauth.url, stateId: state.oauth.state });
     }
   }
@@ -244,4 +297,3 @@
   bindEvents();
   refreshAccounts();
 })();
-

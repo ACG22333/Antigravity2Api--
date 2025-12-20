@@ -49,15 +49,11 @@ npm install node-fetch socks-proxy-agent
 {
   "server": {
     "host": "0.0.0.0",
-    "port": 3000,
-    "public_base_url": "http://localhost:3000"
+    "port": 3000
   },
   "api_keys": [
     "sk-your-secret-key-1"
   ],
-  "oauth": {
-    "redirect_base_url": "http://localhost:3000"
-  },
   "proxy": {
     "enabled": true,
     "url": "http://127.0.0.1:7890"
@@ -71,12 +67,9 @@ npm install node-fetch socks-proxy-agent
 *   **server**:
     *   `host`: 监听地址。`0.0.0.0` 表示允许局域网访问，`127.0.0.1` 仅限本机。
     *   `port`: 服务监听端口（默认 3000）。
-    *   `public_base_url`（可选）: 用于生成 OAuth 回调地址的“对外访问 URL”（反向代理/域名场景建议配置）。
 *   **api_keys**:
     *   允许访问 API 的密钥列表。客户端必须携带其中任意一个 Key 才能访问。
     *   管理界面的 Admin API 也会沿用该 Key 校验（页面内输入后即可管理账号）。
-*   **oauth**:
-    *   `redirect_base_url`（可选）: OAuth redirect 的 base url（优先级高于 `server.public_base_url`）。
 *   **proxy**:
     *   `enabled`: 是否启用代理（`true`/`false`）。
     *   `url`: 代理服务器地址。支持 `http://`, `https://`, `socks5://`。例如 `socks5://127.0.0.1:1080`。
@@ -113,6 +106,9 @@ node src/server.js --add
 
 如果你设置了 `api_keys`，页面会要求你输入 Key 才能调用管理接口（Key 仅保存在浏览器本地）。
 
+> OAuth 回调默认使用：`http://localhost:<port>/oauth-callback`（`<port>` 取 `config.json -> server.port`）。
+> 若你是在远程机器访问本服务，授权完成后浏览器可能会跳转到 `localhost`，请把地址栏里的 `localhost:<port>` 改成当前服务地址再回车即可。
+
 ## 6. 客户端连接 (如 CherryStudio)
 
 在客户端中添加自定义提供商（Claude）：
@@ -131,6 +127,5 @@ node src/server.js --add
     *   检查 `config.json` 中的代理 URL 是否正确且代理软件已开启。
     *   如果是 SOCKS5 代理，确保 `socks-proxy-agent` 已安装。
 
-*   **OAuth 回调地址不对 / redirect_uri_mismatch**:
-    *   确保你访问管理界面的地址与 `oauth.redirect_base_url` / `server.public_base_url` 一致。
-    *   如果你在反向代理后面，优先设置 `oauth.redirect_base_url` 为外部可访问的完整地址（含端口）。
+*   **OAuth 回调打不开**:
+    *   授权完成后若跳到 `http://localhost:<port>/oauth-callback`，请把 `localhost:<port>` 改成当前服务地址再访问。

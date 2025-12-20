@@ -49,7 +49,8 @@
             <span id="oauthState" class="mono">-</span>
           </div>
           <p class="hint">
-            授权成功后会自动写入 <code>auths/*.json</code>，并自动刷新账号列表。
+            授权成功后会自动写入 <code>auths/*.json</code>，并自动刷新账号列表。若你是在远程机器访问本服务，
+            授权完成后浏览器可能会跳转到 <code>http://localhost:&lt;port&gt;/oauth-callback</code>，请把 <code>localhost:&lt;port&gt;</code> 改成当前服务地址后回车即可。
           </p>
         </div>
       </section>
@@ -83,4 +84,3 @@
     <script src="/ui/app.js" defer></script>
   </body>
 </html>
-

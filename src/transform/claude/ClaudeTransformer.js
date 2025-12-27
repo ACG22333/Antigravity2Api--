@@ -779,6 +779,8 @@ function transformClaudeRequestIn(claudeReq, projectId) {
     Array.isArray(claudeReq.tools) &&
     claudeReq.tools.some((tool) => tool?.name === "web_search");
 
+  const isClaudeModel = String(mapClaudeModelToGemini(claudeReq.model)).startsWith("claude");
+
   // 记录 tool_use id 到 name 的映射，便于后续 tool_result 还原函数名
   const toolIdToName = new Map();
 
@@ -939,6 +941,14 @@ function transformClaudeRequestIn(claudeReq, projectId) {
     } else {
       tools = [{ functionDeclarations: [] }];
       for (const tool of claudeReq.tools) {
+        // Claude 模型下：不把 mcp__ 工具暴露给上游（避免上游尝试 tool_use）
+        if (
+          isClaudeModel &&
+          typeof tool?.name === "string" &&
+          tool.name.startsWith("mcp__")
+        ) {
+          continue;
+        }
         if (tool.input_schema) {
           const toolDecl = {
             name: tool.name,

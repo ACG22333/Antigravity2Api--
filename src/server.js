@@ -14,7 +14,7 @@ const { handleAdminRoute, handleOAuthCallbackRoute } = require("./admin/routes")
 const { handleUiRoute } = require("./ui/routes");
 
 const config = getConfig();
-const { log, logFile } = createLogger();
+const { log, logFile } = createLogger({ logRetentionDays: config.log?.retention_days });
 const debugRequestResponse = !!config.debug;
 
 const authManager = new AuthManager({

@@ -58,6 +58,7 @@ AG2API_API_KEYS=sk-your-secret-key-1,sk-your-secret-key-2
 AG2API_PROXY_ENABLED=false
 AG2API_PROXY_URL=
 AG2API_DEBUG=false
+AG2API_LOG_RETENTION_DAYS=3
 ```
 
 **配置项说明：**
@@ -68,6 +69,7 @@ AG2API_DEBUG=false
 - `AG2API_PROXY_ENABLED`：是否启用代理（true/false）
 - `AG2API_PROXY_URL`：代理地址
 - `AG2API_DEBUG`：是否开启 debug（true/false）
+- `AG2API_LOG_RETENTION_DAYS`：日志保留天数（默认 3；设为 0 表示不自动清理）
 
 Google OAuth Client（可选覆盖）：
 

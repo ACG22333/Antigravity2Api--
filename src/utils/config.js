@@ -5,6 +5,7 @@ const DEFAULT_CONFIG = {
   server: { host: "0.0.0.0", port: 3000 },
   api_keys: [],
   proxy: { enabled: false, url: "" },
+  log: { retention_days: 3 },
   // Debug switch: only affects request/response payload logs.
   debug: false,
 };
@@ -77,6 +78,13 @@ function parsePort(value) {
   return n;
 }
 
+function parseNonNegativeInt(value) {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const n = typeof value === "number" ? value : Number.parseInt(String(value).trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 function parseApiKeys(value) {
   if (typeof value !== "string") return null;
   const raw = value.trim();
@@ -110,12 +118,14 @@ function normalizeDebug(rawDebug) {
 function normalizeConfig(raw) {
   const serverRaw = raw && typeof raw.server === "object" ? raw.server : {};
   const proxyRaw = raw && typeof raw.proxy === "object" ? raw.proxy : {};
+  const logRaw = raw && typeof raw.log === "object" ? raw.log : {};
 
   return {
     ...DEFAULT_CONFIG,
     ...(raw && typeof raw === "object" ? raw : {}),
     server: { ...DEFAULT_CONFIG.server, ...serverRaw },
     proxy: { ...DEFAULT_CONFIG.proxy, ...proxyRaw },
+    log: { ...DEFAULT_CONFIG.log, ...logRaw },
     api_keys: Array.isArray(raw?.api_keys) ? raw.api_keys : DEFAULT_CONFIG.api_keys,
     debug: normalizeDebug(raw?.debug),
   };
@@ -126,6 +136,7 @@ function applyEnvOverrides(config) {
     ...config,
     server: { ...config.server },
     proxy: { ...config.proxy },
+    log: { ...config.log },
   };
 
   if (process.env.AG2API_HOST && String(process.env.AG2API_HOST).trim()) {
@@ -156,6 +167,11 @@ function applyEnvOverrides(config) {
   const debug = parseBool(process.env.AG2API_DEBUG);
   if (debug != null) {
     out.debug = debug;
+  }
+
+  const logRetentionDays = parseNonNegativeInt(process.env.AG2API_LOG_RETENTION_DAYS);
+  if (logRetentionDays != null) {
+    out.log.retention_days = logRetentionDays;
   }
 
   return out;

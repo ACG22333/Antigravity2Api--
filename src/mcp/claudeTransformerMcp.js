@@ -24,7 +24,16 @@ function buildMcpToolNamesForHint(claudeReq) {
 
 function buildMcpSwitchModelHint(claudeReq) {
   const mcpToolNamesForHint = buildMcpToolNamesForHint(claudeReq);
-  return `重要：当你需要使用任意 MCP 工具（名字以 mcp__ 开头，例如 ${mcpToolNamesForHint}）时，由于你直接调用MCP 工具会造成严重异常，所以需要通过${MCP_SWITCH_SIGNAL}通知用户，让用户自行选择，严禁直接调用任何MCP工具。你必须只输出下面这一行特殊字符串（完全一致，不要加任何其它文字）：\n${MCP_SWITCH_SIGNAL}，如果你要调用TodoWrite来分步完成MCP调用，也必须先输出下面这一行特殊字符串（完全一致，不要加任何其它文字）：\n${MCP_SWITCH_SIGNAL}`;
+  return (
+    `IMPORTANT（MCP 工具使用规则）\n` +
+    `当前会话提供了 MCP 工具（名称以 \`mcp__\` 开头，例如：${mcpToolNamesForHint}）。\n` +
+    `由于在当前链路下你直接调用任何 \`mcp__*\` 工具会导致严重异常：\n\n` +
+    `1) 只要你判断“现在或后续”需要调用任意 \`mcp__*\` 工具，严禁直接调用工具；也严禁输出其它任何内容（包括解释、计划、TodoWrite、markdown）。\n` +
+    `   即使你在本会话中曾成功调用过 \`mcp__*\` 工具，也必须严格遵守以上规则。\n` +
+    `2) 此时你必须只输出下面这一行特殊字符串（完全一致，单独一行，不要添加任何前后缀/标点/空格/其它字符）：\n` +
+    `${MCP_SWITCH_SIGNAL}\n\n` +
+    `不需要使用 \`mcp__*\` 工具时，请正常回答用户。`
+  );
 }
 
 function maybeInjectMcpHintIntoSystemText({ text, claudeReq, isClaudeModel, injected }) {
@@ -64,4 +73,3 @@ function maybeInjectMcpHintIntoSystemText({ text, claudeReq, isClaudeModel, inje
 module.exports = {
   maybeInjectMcpHintIntoSystemText,
 };
-

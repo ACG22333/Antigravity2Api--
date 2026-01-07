@@ -10,7 +10,12 @@ class UpstreamClient {
 
   // 基础日志方法（兼容旧 API）
   log(title, data) {
-    if (this.logger) return this.logger(title, data);
+    if (this.logger) {
+      if (typeof this.logger.log === "function") {
+        return this.logger.log(title, data);
+      }
+      return this.logger(title, data);
+    }
     if (data !== undefined && data !== null) {
       console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
     } else {

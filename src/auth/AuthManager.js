@@ -365,9 +365,9 @@ class AuthManager {
   }
 
   async fetchAvailableModels() {
-    const accessToken = await this.getCurrentAccessToken();
+    const { accessToken, projectId } = await this.getCredentials();
     await this.waitForApiSlot();
-    return httpClient.fetchAvailableModels(accessToken, this.apiLimiter);
+    return httpClient.fetchAvailableModels(accessToken, this.apiLimiter, projectId);
   }
 
   async fetchUserInfo(accessToken) {

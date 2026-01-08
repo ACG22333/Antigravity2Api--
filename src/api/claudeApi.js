@@ -6,6 +6,26 @@ const {
   updateSessionAfterResponse,
 } = require("../mcp/claudeApiMcp");
 
+const KNOWN_LOG_LEVELS = new Set([
+  "debug",
+  "info",
+  "success",
+  "warn",
+  "error",
+  "fatal",
+  "request",
+  "response",
+  "upstream",
+  "retry",
+  "account",
+  "quota",
+  "stream",
+]);
+
+function isKnownLogLevel(value) {
+  return typeof value === "string" && KNOWN_LOG_LEVELS.has(value.toLowerCase());
+}
+
 function hasWebSearchTool(claudeReq) {
   return Array.isArray(claudeReq?.tools) && claudeReq.tools.some((tool) => tool?.name === "web_search");
 }
@@ -34,25 +54,36 @@ class ClaudeApi {
     this.sessionMcpState = new Map(); // sessionId -> { lastFamily, mcpStartIndex, foldedSegments: [] }
   }
 
-  log(title, data) {
+  log(levelOrTitle, messageOrData, meta) {
     if (this.logger) {
-      if (typeof this.logger === "function") {
-        return this.logger(title, data);
-      }
       if (typeof this.logger.log === "function") {
-        return this.logger.log(title, data);
+        if (isKnownLogLevel(levelOrTitle)) {
+          return this.logger.log(String(levelOrTitle).toLowerCase(), messageOrData, meta);
+        }
+        // Old style: log("Some Title", data) => info("Some Title", data)
+        return this.logger.log("info", String(levelOrTitle), messageOrData);
+      }
+      if (typeof this.logger === "function") {
+        return this.logger(levelOrTitle, messageOrData, meta);
       }
     }
-    if (data !== undefined && data !== null) {
-      console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    } else {
-      console.log(`[${title}]`);
+
+    // Fallback to console (no structured logger available)
+    const title = String(levelOrTitle);
+    if (meta !== undefined && meta !== null) {
+      console.log(`[${title}]`, messageOrData, meta);
+      return;
     }
+    if (messageOrData !== undefined && messageOrData !== null) {
+      console.log(`[${title}]`, typeof messageOrData === "string" ? messageOrData : JSON.stringify(messageOrData, null, 2));
+      return;
+    }
+    console.log(`[${title}]`);
   }
 
   logDebug(title, data) {
     if (!this.debugRequestResponse) return;
-    this.log("debug", `${title}`, data);
+    this.log("debug", title, data);
   }
 
   logStream(event, options = {}) {

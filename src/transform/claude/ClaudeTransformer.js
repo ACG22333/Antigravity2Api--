@@ -12,6 +12,16 @@
 const toolThoughtSignatures = new Map(); // tool_use.id -> thoughtSignature
 const crypto = require("crypto");
 const { maybeInjectMcpHintIntoSystemText } = require("../../mcp/claudeTransformerMcp");
+const fs = require("fs");
+const path = require("path");
+
+let antigravitySystemInstructionText = "";
+try {
+  antigravitySystemInstructionText = fs.readFileSync(
+    path.resolve(__dirname, "antigravity_system_instruction.txt"),
+    "utf8"
+  );
+} catch (_) {}
 
 function makeToolUseId() {
   // Claude Code expects tool_use ids to look like official "toolu_*" ids.
@@ -807,11 +817,11 @@ function transformClaudeRequestIn(claudeReq, projectId, options = {}) {
 
   // 1. System Instruction
   let systemInstruction = undefined;
-	  if (claudeReq.system) {
-	    const systemParts = [];
-	    let injectedMcpHintIntoSystem = false;
-	    if (Array.isArray(claudeReq.system)) {
-	      for (const item of claudeReq.system) {
+  if (claudeReq.system) {
+    const systemParts = [];
+    let injectedMcpHintIntoSystem = false;
+    if (Array.isArray(claudeReq.system)) {
+      for (const item of claudeReq.system) {
 	        if (item && item.type === "text") {
 	          let text = item.text || "";
 	          const injectedResult = maybeInjectMcpHintIntoSystemText({
@@ -835,6 +845,19 @@ function transformClaudeRequestIn(claudeReq, projectId, options = {}) {
         parts: systemParts,
       };
     }
+  }
+
+  // Some upstream models (e.g. claude-*, gemini-3-pro*) require an Antigravity-style systemInstruction,
+  // otherwise they may respond with 429 RESOURCE_EXHAUSTED even when quota exists.
+  const modelNameForSystem = String(claudeReq?.model || "").toLowerCase();
+  if (
+    (modelNameForSystem.includes("claude") || modelNameForSystem.includes("gemini-3-pro")) &&
+    antigravitySystemInstructionText
+  ) {
+    systemInstruction = {
+      role: "user",
+      parts: [{ text: antigravitySystemInstructionText }],
+    };
   }
 
   // 2. Contents (Messages)

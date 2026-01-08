@@ -1,5 +1,25 @@
 const { wrapRequest, unwrapResponse, createUnwrapStream } = require("../transform/gemini");
 
+const KNOWN_LOG_LEVELS = new Set([
+  "debug",
+  "info",
+  "success",
+  "warn",
+  "error",
+  "fatal",
+  "request",
+  "response",
+  "upstream",
+  "retry",
+  "account",
+  "quota",
+  "stream",
+]);
+
+function isKnownLogLevel(value) {
+  return typeof value === "string" && KNOWN_LOG_LEVELS.has(value.toLowerCase());
+}
+
 function headersToObject(headers) {
   const out = {};
   if (!headers || typeof headers.forEach !== "function") return out;
@@ -19,25 +39,34 @@ class GeminiApi {
     this.debugRequestResponse = !!options.debug;
   }
 
-  log(title, data) {
+  log(levelOrTitle, messageOrData, meta) {
     if (this.logger) {
-      if (typeof this.logger === "function") {
-        return this.logger(title, data);
-      }
       if (typeof this.logger.log === "function") {
-        return this.logger.log(title, data);
+        if (isKnownLogLevel(levelOrTitle)) {
+          return this.logger.log(String(levelOrTitle).toLowerCase(), messageOrData, meta);
+        }
+        return this.logger.log("info", String(levelOrTitle), messageOrData);
+      }
+      if (typeof this.logger === "function") {
+        return this.logger(levelOrTitle, messageOrData, meta);
       }
     }
-    if (data !== undefined && data !== null) {
-      console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    } else {
-      console.log(`[${title}]`);
+
+    const title = String(levelOrTitle);
+    if (meta !== undefined && meta !== null) {
+      console.log(`[${title}]`, messageOrData, meta);
+      return;
     }
+    if (messageOrData !== undefined && messageOrData !== null) {
+      console.log(`[${title}]`, typeof messageOrData === "string" ? messageOrData : JSON.stringify(messageOrData, null, 2));
+      return;
+    }
+    console.log(`[${title}]`);
   }
 
   logDebug(title, data) {
     if (!this.debugRequestResponse) return;
-    this.log("debug", `${title}`, data);
+    this.log("debug", title, data);
   }
 
   logStream(event, options = {}) {

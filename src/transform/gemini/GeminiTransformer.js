@@ -1,4 +1,14 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+
+let antigravitySystemInstructionText = "";
+try {
+  antigravitySystemInstructionText = fs.readFileSync(
+    path.resolve(__dirname, "../claude/antigravity_system_instruction.txt"),
+    "utf8"
+  );
+} catch (_) {}
 
 // Convert parametersJsonSchema -> parameters (clean + uppercase type names) for v1internal
 function cleanSchema(schema) {
@@ -177,6 +187,19 @@ function wrapRequest(clientJson, options) {
     requestType = "web_search";
     // Force search requests to use 2.5 flash for built-in search behavior
     mappedModelName = "gemini-2.5-flash";
+  }
+
+  // Some upstream models (e.g. claude-*, gemini-3-pro*) require an Antigravity-style systemInstruction,
+  // otherwise they may respond with 429 RESOURCE_EXHAUSTED even when quota exists.
+  const modelNameForSystem = String(mappedModelName || "").toLowerCase();
+  if (
+    (modelNameForSystem.includes("claude") || modelNameForSystem.includes("gemini-3-pro")) &&
+    antigravitySystemInstructionText
+  ) {
+    innerRequest.systemInstruction = {
+      role: "user",
+      parts: [{ text: antigravitySystemInstructionText }],
+    };
   }
 
   const wrappedBody = {

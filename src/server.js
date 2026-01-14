@@ -1,6 +1,3 @@
-// Proxy must be initialized before any fetch
-require("./utils/proxy");
-
 const http = require("http");
 const path = require("path");
 
@@ -16,6 +13,9 @@ const { handleUiRoute } = require("./ui/routes");
 const config = getConfig();
 const logger = createLogger({ logRetentionDays: config.log?.retention_days });
 const debugRequestResponse = !!config.debug;
+
+// Proxy must be initialized before any fetch
+require("./utils/proxy");
 
 // 兼容旧的日志 API
 const log = (level, data) => {

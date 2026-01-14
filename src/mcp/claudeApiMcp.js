@@ -55,6 +55,9 @@ function collectToolResultIdsAfterLastAssistant(claudeReq) {
   for (let i = startIndex; i < claudeReq.messages.length; i++) {
     const msg = claudeReq.messages[i];
     if (!Array.isArray(msg?.content)) continue;
+    const text = extractTextFromClaudeContent(msg.content);
+    // Interrupted placeholder tool_result should not force MCP routing.
+    if (/\[\s*request interrupted\b/i.test(text)) continue;
     for (const item of msg.content) {
       if (item && item.type === "tool_result" && typeof item.tool_use_id === "string" && item.tool_use_id) {
         toolUseIds.add(item.tool_use_id);

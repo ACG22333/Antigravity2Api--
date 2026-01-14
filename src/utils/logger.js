@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const util = require("util");
 
 // ANSI 颜色代码
 const Colors = {
@@ -199,10 +200,80 @@ function createSeparator(char = "─", length = 60, color = Colors.gray) {
   return `${color}${char.repeat(length)}${Colors.reset}`;
 }
 
+const CONSOLE_CAPTURE_STATE_KEY = "__AG2API_CONSOLE_CAPTURE_STATE__";
+
+function attachConsoleCaptureToLogFile(logFile, rawConsole) {
+  if (!logFile) return;
+
+  const g = globalThis;
+  const state =
+    (g[CONSOLE_CAPTURE_STATE_KEY] && typeof g[CONSOLE_CAPTURE_STATE_KEY] === "object"
+      ? g[CONSOLE_CAPTURE_STATE_KEY]
+      : null) || { installed: false, logFile: null };
+
+  state.logFile = logFile;
+  g[CONSOLE_CAPTURE_STATE_KEY] = state;
+
+  if (state.installed) return;
+  state.installed = true;
+
+  const errOut = (rawConsole && typeof rawConsole.error === "function" ? rawConsole.error : rawConsole?.log) || (() => {});
+  const safeWrite = (level, args) => {
+    try {
+      const target = g[CONSOLE_CAPTURE_STATE_KEY]?.logFile;
+      if (!target) return;
+      const text = util.format(...(Array.isArray(args) ? args : [args]));
+      const line = `[${new Date().toISOString()}] [CONSOLE.${level}] ${text}\n`;
+      fs.appendFile(target, line, (err) => {
+        if (err) errOut("Failed to write captured console output:", err);
+      });
+    } catch (e) {
+      errOut("Failed to capture console output:", e);
+    }
+  };
+
+  const raw = {
+    log: (rawConsole && typeof rawConsole.log === "function" ? rawConsole.log : console.log).bind(console),
+    info: (rawConsole && typeof rawConsole.info === "function" ? rawConsole.info : console.info || console.log).bind(console),
+    warn: (rawConsole && typeof rawConsole.warn === "function" ? rawConsole.warn : console.warn || console.log).bind(console),
+    error: (rawConsole && typeof rawConsole.error === "function" ? rawConsole.error : console.error || console.log).bind(console),
+    debug: (rawConsole && typeof rawConsole.debug === "function" ? rawConsole.debug : console.debug || console.log).bind(console),
+  };
+
+  console.log = (...args) => {
+    raw.log(...args);
+    safeWrite("LOG", args);
+  };
+  console.info = (...args) => {
+    raw.info(...args);
+    safeWrite("INFO", args);
+  };
+  console.warn = (...args) => {
+    raw.warn(...args);
+    safeWrite("WARN", args);
+  };
+  console.error = (...args) => {
+    raw.error(...args);
+    safeWrite("ERROR", args);
+  };
+  console.debug = (...args) => {
+    raw.debug(...args);
+    safeWrite("DEBUG", args);
+  };
+}
+
 /**
  * 创建增强的日志记录器
  */
 function createLogger(options = {}) {
+  const rawConsole = {
+    log: typeof console.log === "function" ? console.log.bind(console) : () => {},
+    info: typeof console.info === "function" ? console.info.bind(console) : null,
+    warn: typeof console.warn === "function" ? console.warn.bind(console) : null,
+    error: typeof console.error === "function" ? console.error.bind(console) : null,
+    debug: typeof console.debug === "function" ? console.debug.bind(console) : null,
+  };
+
   const logDir = options.logDir || path.resolve(process.cwd(), "log");
   ensureDir(logDir);
 
@@ -220,6 +291,7 @@ function createLogger(options = {}) {
   )}-${String(now.getSeconds()).padStart(2, "0")}.log`;
 
   const logFile = path.join(logDir, logFileName);
+  attachConsoleCaptureToLogFile(logFile, rawConsole);
   
   const minLevel = options.minLevel || "debug";
   const minPriority = (LogLevels[minLevel] || LogLevels.debug).priority;
@@ -299,7 +371,7 @@ function createLogger(options = {}) {
       }
     }
     
-    console.log(consoleOutput);
+    rawConsole.log(consoleOutput);
     
     // 文件日志（纯文本，无颜色）
     const separator = "-".repeat(60);
@@ -307,7 +379,7 @@ function createLogger(options = {}) {
     const fileEntry = `[${fullTimestamp}] [${levelConfig.label}] ${message}\n${metaContent ? metaContent + "\n" : ""}${separator}\n`;
     
     fs.appendFile(logFile, fileEntry, (err) => {
-      if (err) console.error("Failed to write to log file:", err);
+      if (err && typeof rawConsole.error === "function") rawConsole.error("Failed to write to log file:", err);
     });
   };
 

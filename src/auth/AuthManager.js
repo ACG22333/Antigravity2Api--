@@ -121,13 +121,6 @@ class AuthManager {
     }
   }
 
-  logAccount(action, options = {}) {
-    if (this.logger && typeof this.logger.logAccount === "function") {
-      return this.logger.logAccount(action, options);
-    }
-    this.log("account", { action, ...options });
-  }
-
   async waitForApiSlot() {
     if (this.apiLimiter) {
       await this.apiLimiter.wait();
@@ -165,20 +158,6 @@ class AuthManager {
       this.currentAccountIndexByGroup = { claude: 0, gemini: 0 };
     }
     this.currentAccountIndexByGroup[g] = index;
-  }
-
-  rotateAccount(group) {
-    const g = normalizeQuotaGroup(group);
-    if (this.accounts.length <= 1) return false;
-    const nextIndex = (this.getCurrentAccountIndex(g) + 1) % this.accounts.length;
-    this.setCurrentAccountIndex(g, nextIndex);
-    const accountName = this.accounts[nextIndex].keyName;
-    this.logAccount(`轮换账户`, {
-      group: g,
-      account: accountName,
-      reason: `切换到第 ${nextIndex + 1}/${this.accounts.length} 个账户`,
-    });
-    return true;
   }
 
   async deleteAccountByFile(fileName) {
@@ -349,6 +328,71 @@ class AuthManager {
       accessToken: account.creds.access_token,
       projectId: account.creds.projectId,
       account,
+    };
+  }
+
+  async getCredentialsByIndex(index, group) {
+    if (this.accounts.length === 0) {
+      throw new Error("No accounts available. Please authenticate first.");
+    }
+
+    const quotaGroup = normalizeQuotaGroup(group);
+    const logGroup = group ? String(group).trim() : quotaGroup;
+    const accountIndex = Number.isInteger(index) ? index : Number.parseInt(String(index), 10);
+    if (!Number.isInteger(accountIndex) || accountIndex < 0 || accountIndex >= this.accounts.length) {
+      throw new Error(`Invalid account index: ${index}`);
+    }
+
+    const account = this.accounts[accountIndex];
+
+    if (account.refreshPromise) {
+      await account.refreshPromise;
+    }
+
+    if (account.creds.expiry_date < +new Date()) {
+      const accountName = path.basename(account.filePath);
+      this.log("info", `Refreshing token for [${logGroup}] account ${accountIndex + 1} (${accountName})...`);
+      await this.refreshToken(account);
+    }
+
+    await this.ensureProjectId(account);
+
+    return {
+      accessToken: account.creds.access_token,
+      projectId: account.creds.projectId,
+      account,
+      accountIndex,
+    };
+  }
+
+  async getAccessTokenByIndex(index, group) {
+    if (this.accounts.length === 0) {
+      throw new Error("No accounts available. Please authenticate first.");
+    }
+
+    const quotaGroup = normalizeQuotaGroup(group);
+    const logGroup = group ? String(group).trim() : quotaGroup;
+    const accountIndex = Number.isInteger(index) ? index : Number.parseInt(String(index), 10);
+    if (!Number.isInteger(accountIndex) || accountIndex < 0 || accountIndex >= this.accounts.length) {
+      throw new Error(`Invalid account index: ${index}`);
+    }
+
+    const account = this.accounts[accountIndex];
+
+    if (account.refreshPromise) {
+      await account.refreshPromise;
+    }
+
+    if (account.creds.expiry_date < +new Date()) {
+      const accountName = path.basename(account.filePath);
+      this.log("info", `Refreshing token for [${logGroup}] account ${accountIndex + 1} (${accountName})...`);
+      await this.refreshToken(account);
+    }
+
+    return {
+      accessToken: account.creds.access_token,
+      account,
+      accountIndex,
     };
   }
 

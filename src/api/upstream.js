@@ -1,26 +1,78 @@
 const path = require("path");
 
 const httpClient = require("../auth/httpClient");
+const QuotaRefresher = require("./QuotaRefresher");
+
+function parseEnvNonNegativeInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null) return fallback;
+  const n = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
+// Fixed delay used for:
+// - network error retry
+// - 429 without retryDelay (and after account rotation)
+// - 429 with retryDelay > 5000ms (after rotation)
+const FIXED_RETRY_DELAY_MS = parseEnvNonNegativeInt("AG2API_RETRY_DELAY_MS", 1200);
+
+// First request will wait up to this long for the initial quota refresh to complete.
+const INITIAL_QUOTA_WAIT_MS = 3000;
+
+const KNOWN_LOG_LEVELS = new Set([
+  "debug",
+  "info",
+  "success",
+  "warn",
+  "error",
+  "fatal",
+  "request",
+  "response",
+  "upstream",
+  "retry",
+  "account",
+  "quota",
+  "stream",
+]);
+
+function isKnownLogLevel(value) {
+  return typeof value === "string" && KNOWN_LOG_LEVELS.has(value.toLowerCase());
+}
 
 class UpstreamClient {
   constructor(authManager, options = {}) {
     this.auth = authManager;
     this.logger = options.logger || null;
+
+    this.quotaRefresher = new QuotaRefresher(this.auth, { logger: this.logger, initialWaitMs: INITIAL_QUOTA_WAIT_MS });
+    this.quotaRefresher.start();
   }
 
   // 基础日志方法（兼容旧 API）
-  log(title, data) {
+  log(levelOrTitle, messageOrData, meta) {
     if (this.logger) {
       if (typeof this.logger.log === "function") {
-        return this.logger.log(title, data);
+        if (isKnownLogLevel(levelOrTitle)) {
+          return this.logger.log(String(levelOrTitle).toLowerCase(), messageOrData, meta);
+        }
+        return this.logger.log("info", String(levelOrTitle), messageOrData);
       }
-      return this.logger(title, data);
+      if (typeof this.logger === "function") {
+        return this.logger(levelOrTitle, messageOrData, meta);
+      }
     }
-    if (data !== undefined && data !== null) {
-      console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    } else {
-      console.log(`[${title}]`);
+
+    const title = String(levelOrTitle);
+    if (meta !== undefined && meta !== null) {
+      console.log(`[${title}]`, messageOrData, meta);
+      return;
     }
+    if (messageOrData !== undefined && messageOrData !== null) {
+      console.log(`[${title}]`, typeof messageOrData === "string" ? messageOrData : JSON.stringify(messageOrData, null, 2));
+      return;
+    }
+    console.log(`[${title}]`);
   }
 
   // 上游调用日志
@@ -118,6 +170,10 @@ class UpstreamClient {
     return null;
   }
 
+  getAccountKeyFromAccount(account) {
+    return account?.filePath ? path.basename(account.filePath) : "unknown-account";
+  }
+
   parseErrorDetails(errText) {
     try {
       const errObj = JSON.parse(errText);
@@ -133,7 +189,10 @@ class UpstreamClient {
   }
 
   sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      if (timer && typeof timer.unref === "function") timer.unref();
+    });
   }
 
   /**
@@ -154,33 +213,105 @@ class UpstreamClient {
     }
 
     const quotaGroup = this.getQuotaGroupFromModel(options.group || options.model);
+    const modelId = String(options.model || "").trim();
     const queryString = options.queryString || "";
     const headers = options.headers && typeof options.headers === "object" ? options.headers : {};
 
     let lastResponse = null;
+    let lastNetworkError = null;
     const maxAttempts = this.getMaxAttempts();
 
     this.logUpstream(`开始调用 v1internal:${method}`, {
       method,
       group: quotaGroup,
-      model: options.model,
+      model: modelId || options.model,
       maxAttempts,
     });
 
-    for (let attempts = 0; attempts < maxAttempts; attempts++) {
-      const attemptNum = attempts + 1;
-      let creds;
-      
+    // Best-effort: wait for initial quota refresh so the first request can pick the best account.
+    if (modelId && this.quotaRefresher) {
       try {
-        creds = await this.auth.getCredentials(quotaGroup);
+        await this.quotaRefresher.waitInitialRefresh(INITIAL_QUOTA_WAIT_MS);
+      } catch (_) {}
+    }
+
+    const triedAccountIndices = new Set();
+    let waitedForCooldown = false;
+    let attemptNum = 0;
+
+    while (attemptNum < maxAttempts) {
+      const now = Date.now();
+
+      let accountIndex;
+      if (modelId && this.quotaRefresher) {
+        const decision = this.quotaRefresher.pickAccountIndex(modelId, {
+          now,
+          excludeAccountIndices: triedAccountIndices,
+          cooldownWaitThresholdMs: 5000,
+        });
+
+        if (decision?.kind === "wait") {
+          if (waitedForCooldown) {
+            const cached = this.quotaRefresher.getCachedErrorResponse(modelId);
+            if (cached) return cached;
+            if (lastResponse) return lastResponse;
+            if (lastNetworkError) throw lastNetworkError;
+            throw new Error(`All accounts are in cooldown for model ${modelId}`);
+          }
+
+          waitedForCooldown = true;
+          const waitMs = Math.max(0, Number(decision.waitMs) || 0);
+          this.logRetry("所有账户冷却中，等待后重试", {
+            attempt: attemptNum + 1,
+            maxAttempts,
+            delayMs: waitMs,
+            nextAction: "等待冷却结束后重新选择账户",
+          });
+          await this.sleep(waitMs);
+          triedAccountIndices.clear();
+          continue;
+        }
+
+        if (decision?.kind === "fast_fail") {
+          if (decision.response) return decision.response;
+          const cached = this.quotaRefresher.getCachedErrorResponse(modelId);
+          if (cached) return cached;
+          if (lastResponse) return lastResponse;
+          if (lastNetworkError) throw lastNetworkError;
+          throw new Error(`No accounts available for model ${modelId}`);
+        }
+
+        if (decision?.kind !== "pick" || !Number.isInteger(decision.accountIndex)) {
+          const cached = this.quotaRefresher.getCachedErrorResponse(modelId);
+          if (cached) return cached;
+          if (lastResponse) return lastResponse;
+          if (lastNetworkError) throw lastNetworkError;
+          throw new Error(`Failed to pick an account for model ${modelId}`);
+        }
+
+        accountIndex = decision.accountIndex;
+      } else {
+        accountIndex = this.auth?.getCurrentAccountIndex ? this.auth.getCurrentAccountIndex(quotaGroup) : 0;
+      }
+
+      triedAccountIndices.add(accountIndex);
+      attemptNum++;
+
+      if (this.auth?.setCurrentAccountIndex && modelId) {
+        this.auth.setCurrentAccountIndex(quotaGroup, accountIndex);
+      }
+
+      let creds;
+      try {
+        creds = await this.auth.getCredentialsByIndex(accountIndex, quotaGroup);
       } catch (e) {
         this.logError(`获取凭证失败 [${quotaGroup}]`, e, { attempt: attemptNum, maxAttempts });
         throw e;
       }
 
-      const accountName = creds?.account?.filePath ? path.basename(creds.account.filePath) : "unknown-account";
+      const accountName = this.getAccountKeyFromAccount(creds.account);
       const requestBody = buildBody(creds.projectId);
-      const startTime = Date.now();
+      let startTime = Date.now();
 
       this.logUpstream(`发送请求`, {
         method,
@@ -188,7 +319,7 @@ class UpstreamClient {
         group: quotaGroup,
         attempt: attemptNum,
         maxAttempts,
-        model: options.model,
+        model: modelId || options.model,
       });
 
       let response;
@@ -200,6 +331,8 @@ class UpstreamClient {
         });
       } catch (netErr) {
         const duration = Date.now() - startTime;
+        lastNetworkError = netErr;
+
         this.logError(`网络错误`, netErr, {
           context: {
             method: `v1internal:${method}`,
@@ -211,21 +344,53 @@ class UpstreamClient {
           },
         });
 
-        // Network/transport error: rotate and try next account.
-        lastResponse = null;
-        
-        this.logRetry("网络错误，轮换账户", {
-          attempt: attemptNum,
-          maxAttempts,
-          account: accountName,
-          error: netErr.message || netErr,
-          nextAction: "轮换到下一个账户",
-        });
+        if (maxAttempts === 1) {
+          this.logRetry("网络错误，等待重试", {
+            attempt: attemptNum,
+            maxAttempts,
+            delayMs: FIXED_RETRY_DELAY_MS,
+            account: accountName,
+            error: netErr.message || netErr,
+            nextAction: "同账户重试",
+          });
 
-        if (this.auth && typeof this.auth.rotateAccount === "function") {
-          this.auth.rotateAccount(quotaGroup);
+          await this.sleep(FIXED_RETRY_DELAY_MS);
+
+          startTime = Date.now();
+          try {
+            response = await httpClient.callV1Internal(method, creds.accessToken, requestBody, {
+              queryString,
+              headers,
+              limiter: this.auth.apiLimiter,
+            });
+          } catch (netErr2) {
+            const retryDuration = Date.now() - startTime;
+            lastNetworkError = netErr2;
+            this.logError(`重试时网络错误`, netErr2, {
+              context: {
+                method: `v1internal:${method}`,
+                group: quotaGroup,
+                account: accountName,
+                attempt: attemptNum,
+                maxAttempts,
+                duration: retryDuration,
+              },
+            });
+            throw netErr2;
+          }
+        } else {
+          this.logRetry("网络错误，切换账户重试", {
+            attempt: attemptNum,
+            maxAttempts,
+            delayMs: FIXED_RETRY_DELAY_MS,
+            account: accountName,
+            error: netErr.message || netErr,
+            nextAction: "轮换到下一个账户",
+          });
+
+          await this.sleep(FIXED_RETRY_DELAY_MS);
+          continue;
         }
-        continue;
       }
 
       const duration = Date.now() - startTime;
@@ -241,6 +406,10 @@ class UpstreamClient {
           duration,
         });
         return response;
+      }
+
+      if (modelId && this.quotaRefresher) {
+        await this.quotaRefresher.cacheLastErrorResponse(modelId, response);
       }
 
       // Non-429 4xx: do not retry/rotate, pass through as-is.
@@ -262,7 +431,6 @@ class UpstreamClient {
           duration,
           error: errorDetails,
         });
-
         return response;
       }
 
@@ -275,7 +443,7 @@ class UpstreamClient {
       } catch (_) {}
 
       const errorDetails = this.parseErrorDetails(errorText);
-      const retryMs = this.parseRetryDelayMs(errorText);
+      let retryMs = this.parseRetryDelayMs(errorText);
 
       this.logQuota(`收到 429 限流响应`, {
         account: accountName,
@@ -285,10 +453,20 @@ class UpstreamClient {
 
       this.log("error", `🚫 Google API 429 错误详情`, errorDetails);
 
-      if (retryMs != null && retryMs <= 5000) {
-        const delay = Math.max(0, retryMs + 200);
-        
-        this.logRetry("短时间限流，等待重试", {
+      if (modelId && this.quotaRefresher) {
+        const cooldownUntil = now + (retryMs != null ? Math.max(0, retryMs) : FIXED_RETRY_DELAY_MS);
+        this.quotaRefresher.setCooldownUntil(modelId, accountName, cooldownUntil);
+      }
+
+      if (maxAttempts === 1) {
+        if (retryMs != null && retryMs > 5000) {
+          // Long cooldown: do not wait, just return the 429 as-is.
+          return response;
+        }
+
+        const delay = retryMs == null ? FIXED_RETRY_DELAY_MS : Math.max(0, retryMs + 200);
+        const reason = retryMs == null ? "429 无重试信息，延迟后同账户重试" : "短时间限流，延迟后同账户重试";
+        this.logRetry(reason, {
           attempt: attemptNum,
           maxAttempts,
           delayMs: delay,
@@ -298,8 +476,7 @@ class UpstreamClient {
 
         await this.sleep(delay);
 
-        // Retry once on the same account with the same request body.
-        const retryStartTime = Date.now();
+        startTime = Date.now();
         let retryResp;
         try {
           retryResp = await httpClient.callV1Internal(method, creds.accessToken, requestBody, {
@@ -308,33 +485,22 @@ class UpstreamClient {
             limiter: this.auth.apiLimiter,
           });
         } catch (netErr2) {
-          const retryDuration = Date.now() - retryStartTime;
+          const retryDuration = Date.now() - startTime;
+          lastNetworkError = netErr2;
           this.logError(`重试时网络错误`, netErr2, {
             context: {
               method: `v1internal:${method}`,
               group: quotaGroup,
               account: accountName,
               attempt: attemptNum,
+              maxAttempts,
               duration: retryDuration,
             },
           });
-
-          this.logRetry("重试失败，轮换账户", {
-            attempt: attemptNum,
-            maxAttempts,
-            account: accountName,
-            error: netErr2.message || netErr2,
-            nextAction: "轮换到下一个账户",
-          });
-
-          if (this.auth && typeof this.auth.rotateAccount === "function") {
-            this.auth.rotateAccount(quotaGroup);
-          }
-          continue;
+          throw netErr2;
         }
 
-        const retryDuration = Date.now() - retryStartTime;
-
+        const retryDuration = Date.now() - startTime;
         if (retryResp.ok) {
           this.logUpstream(`重试成功`, {
             method,
@@ -347,7 +513,11 @@ class UpstreamClient {
           });
           return retryResp;
         }
-        
+
+        if (modelId && this.quotaRefresher) {
+          await this.quotaRefresher.cacheLastErrorResponse(modelId, retryResp);
+        }
+
         if (retryResp.status !== 429) {
           this.logUpstream(`重试返回非 429 错误`, {
             method,
@@ -362,43 +532,52 @@ class UpstreamClient {
         }
 
         lastResponse = retryResp;
-        
-        this.logQuota(`重试后仍然 429`, {
-          account: accountName,
-          group: quotaGroup,
-        });
+        return retryResp;
       }
 
-      // Rotate to next account (either delay>5s, no delay, or retry still 429).
-      this.logRetry("需要轮换账户", {
-        attempt: attemptNum,
-        maxAttempts,
-        delayMs: retryMs,
-        account: accountName,
-        nextAction: retryMs && retryMs > 5000 ? `延迟过长 (${retryMs}ms)，轮换账户` : "轮换到下一个账户",
-      });
-
-      if (this.auth && typeof this.auth.rotateAccount === "function") {
-        this.auth.rotateAccount(quotaGroup);
+      if (retryMs == null) {
+        this.logRetry("429 无重试信息，延迟后切换账户", {
+          attempt: attemptNum,
+          maxAttempts,
+          delayMs: FIXED_RETRY_DELAY_MS,
+          account: accountName,
+          nextAction: "延迟后轮换到下一个账户",
+        });
+        await this.sleep(FIXED_RETRY_DELAY_MS);
+      } else {
+        this.logRetry("429 可解析重试信息，立即切换账户", {
+          attempt: attemptNum,
+          maxAttempts,
+          delayMs: retryMs,
+          account: accountName,
+          nextAction: "立即轮换到下一个账户",
+        });
       }
     }
 
-    // Exhausted: return the last upstream 429 response as-is (status/headers/body passthrough).
     if (lastResponse) {
       this.logError(`所有账户都已耗尽`, null, {
         context: {
           method: `v1internal:${method}`,
           group: quotaGroup,
           totalAttempts: maxAttempts,
+          model: modelId || options.model,
         },
       });
       return lastResponse;
     }
 
+    if (lastNetworkError) {
+      throw lastNetworkError;
+    }
+
+    const cached = modelId && this.quotaRefresher ? this.quotaRefresher.getCachedErrorResponse(modelId) : null;
+    if (cached) return cached;
+
     const error = new Error(`Upstream call exhausted without a response (v1internal:${method})`);
     error.status = 500;
     this.logError(`上游调用失败`, error, {
-      context: { method: `v1internal:${method}`, group: quotaGroup },
+      context: { method: `v1internal:${method}`, group: quotaGroup, model: modelId || options.model },
     });
     throw error;
   }
@@ -407,6 +586,13 @@ class UpstreamClient {
     const { accessToken, projectId } = await this.auth.getCredentials();
     this.log("info", `📋 获取可用模型列表 (projectId: ${projectId || "none"})`);
     return httpClient.fetchAvailableModels(accessToken, this.auth.apiLimiter, projectId);
+  }
+
+  async fetchAvailableModelsByAccountIndex(accountIndex) {
+    if (!this.quotaRefresher) {
+      throw new Error("QuotaRefresher not initialized");
+    }
+    return this.quotaRefresher.fetchModelsByAccountIndex(accountIndex);
   }
 
   /**

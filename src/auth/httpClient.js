@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 
-const V1INTERNAL_BASE_URL = "https://cloudcode-pa.googleapis.com/v1internal";
+const V1INTERNAL_BASE_URL = "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal";
 
 function buildV1InternalUrl(method, queryString = "") {
   const qs = queryString ? String(queryString) : "";
@@ -33,7 +33,7 @@ async function waitForApiSlot(limiter) {
 
 /**
  * Raw v1internal call helper.
- * This is the single place where cloudcode-pa.googleapis.com/v1internal is fetched.
+ * This is the single place where daily-cloudcode-pa.sandbox.googleapis.com/v1internal is fetched.
  *
  * @param {string} method - v1internal method name (e.g. "generateContent", "countTokens")
  * @param {string} accessToken
@@ -55,7 +55,8 @@ async function callV1Internal(method, accessToken, body, options = {}) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": "antigravity/1.11.9 windows/amd64",
+      "User-Agent": "antigravity/ windows/arm64",
+      "Accept-Encoding": "gzip",
       ...extraHeaders,
     },
     body: JSON.stringify(body || {}),
@@ -67,8 +68,8 @@ async function fetchProjectId(accessToken, limiter) {
   const response = await fetch(buildV1InternalUrl("loadCodeAssist"), {
     method: "POST",
     headers: {
-      Host: "cloudcode-pa.googleapis.com",
-      "User-Agent": "antigravity/1.11.9 windows/amd64",
+      Host: "daily-cloudcode-pa.sandbox.googleapis.com",
+      "User-Agent": "antigravity/ windows/arm64",
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json",
       "Accept-Encoding": "gzip",
@@ -101,7 +102,7 @@ async function fetchAvailableModels(accessToken, limiter, projectId) {
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": "antigravity/1.11.9 windows/amd64",
+      "User-Agent": "antigravity/ windows/arm64",
     },
     body: JSON.stringify(payload),
   });

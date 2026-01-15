@@ -1,4 +1,31 @@
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+
+function normalizeAntigravitySystemInstructionText(text) {
+  if (typeof text !== "string") return "";
+  // Allow the file to be pasted from JSON logs (single line with literal "\n"/"\t" escapes).
+  if (!text.includes("\n") && text.includes("\\n")) {
+    return text
+      .replace(/\\r\\n/g, "\n")
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t")
+      .replace(/\\r/g, "\r")
+      .replace(/\\\\/g, "\\");
+  }
+  return text;
+}
+
+let antigravitySystemInstructionText = "";
+try {
+  antigravitySystemInstructionText = fs.readFileSync(
+    path.resolve(__dirname, "../claude/antigravity_system_instruction.txt"),
+    "utf8"
+  );
+  antigravitySystemInstructionText = normalizeAntigravitySystemInstructionText(
+    antigravitySystemInstructionText
+  );
+} catch (_) {}
 
 // Convert parametersJsonSchema -> parameters (clean + uppercase type names) for v1internal
 function cleanSchema(schema) {
@@ -23,6 +50,8 @@ function cleanSchema(schema) {
     "uniqueItems",
     // v1internal Schema doesn't support JSON Schema draft keywords like `propertyNames`.
     "propertyNames",
+    "patternProperties",
+    "unevaluatedProperties"
   ]);
   let constValue;
   const validations = [];
@@ -177,6 +206,20 @@ function wrapRequest(clientJson, options) {
     requestType = "web_search";
     // Force search requests to use 2.5 flash for built-in search behavior
     mappedModelName = "gemini-2.5-flash";
+  }
+
+  // Some upstream models (e.g. claude-*, gemini-3-pro*) require an Antigravity-style systemInstruction,
+  // otherwise they may respond with 429 RESOURCE_EXHAUSTED even when quota exists.
+  const modelNameForSystem = String(mappedModelName || "").toLowerCase();
+  if (
+    (modelNameForSystem.includes("claude") || modelNameForSystem.includes("gemini-3-pro")) &&
+    antigravitySystemInstructionText
+  ) {
+    // Directly replace the entire systemInstruction with antigravity content
+    innerRequest.systemInstruction = {
+      role: "user",
+      parts: [{ text: antigravitySystemInstructionText }],
+    };
   }
 
   const wrappedBody = {

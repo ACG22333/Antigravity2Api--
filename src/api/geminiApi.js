@@ -1,5 +1,169 @@
 const { wrapRequest, unwrapResponse, createUnwrapStream } = require("../transform/gemini");
 
+function isGemini3ModelName(modelName) {
+  return String(modelName || "")
+    .toLowerCase()
+    .includes("gemini-3-pro");
+}
+
+function ensureAltSse(queryString) {
+  const raw = String(queryString || "");
+  const qs = raw.startsWith("?") ? raw.slice(1) : raw;
+  const params = new URLSearchParams(qs);
+  params.set("alt", "sse");
+  const next = params.toString();
+  return next ? `?${next}` : "?alt=sse";
+}
+
+function ensureMergedCandidate(target) {
+  if (!target || typeof target !== "object") return null;
+  if (!Array.isArray(target.candidates)) target.candidates = [];
+  if (!target.candidates[0] || typeof target.candidates[0] !== "object") {
+    target.candidates[0] = { content: { role: "model", parts: [] } };
+  }
+  if (!target.candidates[0].content || typeof target.candidates[0].content !== "object") {
+    target.candidates[0].content = { role: "model", parts: [] };
+  }
+  if (!Array.isArray(target.candidates[0].content.parts)) target.candidates[0].content.parts = [];
+  return target.candidates[0];
+}
+
+function mergeGeminiParts(targetParts, sourceParts) {
+  if (!Array.isArray(targetParts) || !Array.isArray(sourceParts) || sourceParts.length === 0) return;
+
+  const isMergeablePlainTextPart = (part) => {
+    if (!part || typeof part !== "object") return false;
+    if (typeof part.text !== "string") return false;
+    if (part.thought === true) return false;
+    const keys = Object.keys(part);
+    return keys.every((k) => k === "text" || k === "thought");
+  };
+
+  for (const part of sourceParts) {
+    if (!part || typeof part !== "object") continue;
+
+    if (part.thought === true && typeof part.text === "string") {
+      const last = targetParts[targetParts.length - 1];
+      if (last && typeof last === "object" && last.thought === true && typeof last.text === "string") {
+        last.text += part.text;
+        if (typeof part.thoughtSignature === "string" && part.thoughtSignature) {
+          last.thoughtSignature = part.thoughtSignature;
+        }
+        continue;
+      }
+    }
+
+    if (isMergeablePlainTextPart(part)) {
+      const last = targetParts[targetParts.length - 1];
+      if (isMergeablePlainTextPart(last)) {
+        last.text += part.text;
+        continue;
+      }
+    }
+
+    targetParts.push(part);
+  }
+}
+
+function mergeGeminiStreamChunk(target, chunk) {
+  if (!chunk || typeof chunk !== "object") return target;
+  const out = target && typeof target === "object" ? target : {};
+
+  for (const [key, value] of Object.entries(chunk)) {
+    if (key !== "candidates") {
+      out[key] = value;
+      continue;
+    }
+
+    if (!Array.isArray(value) || value.length === 0) continue;
+    const src = value[0];
+    if (!src || typeof src !== "object") continue;
+
+    const dst = ensureMergedCandidate(out);
+    if (!dst) continue;
+
+    for (const [ck, cv] of Object.entries(src)) {
+      if (ck === "content") {
+        if (!cv || typeof cv !== "object") continue;
+        if (cv.role) dst.content.role = cv.role;
+        if (Array.isArray(cv.parts) && cv.parts.length > 0) {
+          mergeGeminiParts(dst.content.parts, cv.parts);
+        }
+        continue;
+      }
+      dst[ck] = cv;
+    }
+  }
+
+  return out;
+}
+
+async function readGeminiSseToUnwrapped(body) {
+  const merged = { candidates: [{ content: { role: "model", parts: [] } }] };
+  if (!body || typeof body.getReader !== "function") return merged;
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const dataStr = line.slice(5).trim();
+      if (!dataStr || dataStr === "[DONE]") continue;
+
+      try {
+        const parsed = JSON.parse(dataStr);
+        const unwrapped = unwrapResponse(parsed);
+        mergeGeminiStreamChunk(merged, unwrapped);
+      } catch (_) {
+        // ignore parse failures
+      }
+    }
+  }
+
+  const tail = buffer.trimEnd();
+  if (tail.startsWith("data:")) {
+    const dataStr = tail.slice(5).trim();
+    if (dataStr && dataStr !== "[DONE]") {
+      try {
+        const parsed = JSON.parse(dataStr);
+        const unwrapped = unwrapResponse(parsed);
+        mergeGeminiStreamChunk(merged, unwrapped);
+      } catch (_) {}
+    }
+  }
+
+  return merged;
+}
+
+const KNOWN_LOG_LEVELS = new Set([
+  "debug",
+  "info",
+  "success",
+  "warn",
+  "error",
+  "fatal",
+  "request",
+  "response",
+  "upstream",
+  "retry",
+  "account",
+  "quota",
+  "stream",
+]);
+
+function isKnownLogLevel(value) {
+  return typeof value === "string" && KNOWN_LOG_LEVELS.has(value.toLowerCase());
+}
+
 function headersToObject(headers) {
   const out = {};
   if (!headers || typeof headers.forEach !== "function") return out;
@@ -19,23 +183,34 @@ class GeminiApi {
     this.debugRequestResponse = !!options.debug;
   }
 
-  log(title, data) {
+  log(levelOrTitle, messageOrData, meta) {
     if (this.logger) {
       if (typeof this.logger.log === "function") {
-        return this.logger.log(title, data);
+        if (isKnownLogLevel(levelOrTitle)) {
+          return this.logger.log(String(levelOrTitle).toLowerCase(), messageOrData, meta);
+        }
+        return this.logger.log("info", String(levelOrTitle), messageOrData);
       }
-      return this.logger(title, data);
+      if (typeof this.logger === "function") {
+        return this.logger(levelOrTitle, messageOrData, meta);
+      }
     }
-    if (data !== undefined && data !== null) {
-      console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    } else {
-      console.log(`[${title}]`);
+
+    const title = String(levelOrTitle);
+    if (meta !== undefined && meta !== null) {
+      console.log(`[${title}]`, messageOrData, meta);
+      return;
     }
+    if (messageOrData !== undefined && messageOrData !== null) {
+      console.log(`[${title}]`, typeof messageOrData === "string" ? messageOrData : JSON.stringify(messageOrData, null, 2));
+      return;
+    }
+    console.log(`[${title}]`);
   }
 
   logDebug(title, data) {
     if (!this.debugRequestResponse) return;
-    this.log("debug", `${title}`, data);
+    this.log("debug", title, data);
   }
 
   logStream(event, options = {}) {
@@ -149,14 +324,22 @@ class GeminiApi {
     try {
       this.logDebug("Gemini Request Raw", clientBody || "(empty body)");
 
+      const clientWantsStream = method === "streamGenerateContent";
+
       const clientBodyJson = JSON.stringify(clientBody || {});
       const quotaProbe = wrapRequest(JSON.parse(clientBodyJson), { projectId: "", modelName });
       const modelForQuota = quotaProbe.mappedModelName || modelName;
 
+      const mustUseStream = isGemini3ModelName(modelForQuota);
+      const upstreamMethod = mustUseStream ? "streamGenerateContent" : method;
+      const upstreamQueryString =
+        upstreamMethod === "streamGenerateContent" ? ensureAltSse(queryString || "") : queryString || "";
+      const shouldAggregateStream = !clientWantsStream && upstreamMethod === "streamGenerateContent";
+
       let loggedWrapped = false;
-      const upstreamResponse = await this.upstream.callV1Internal(method, {
+      const upstreamResponse = await this.upstream.callV1Internal(upstreamMethod, {
         model: modelForQuota,
-        queryString: queryString || "",
+        queryString: upstreamQueryString,
         buildBody: (projectId) => {
           const { wrappedBody } = wrapRequest(JSON.parse(clientBodyJson), { projectId, modelName });
           if (!loggedWrapped) {
@@ -191,6 +374,15 @@ class GeminiApi {
       }
 
       const contentType = responseForClient.headers.get("content-type") || "";
+
+      if (shouldAggregateStream && contentType.includes("stream") && responseForClient.body) {
+        const aggregated = await readGeminiSseToUnwrapped(responseForClient.body);
+        this.logDebug("Gemini Response Wrapped (Aggregated)", aggregated);
+
+        const respHeaders = headersToObject(responseForClient.headers);
+        respHeaders["Content-Type"] = "application/json";
+        return { status: responseForClient.status, headers: respHeaders, body: aggregated };
+      }
 
       // JSON response: unwrap payload and return JSON object
       if (contentType.includes("application/json")) {

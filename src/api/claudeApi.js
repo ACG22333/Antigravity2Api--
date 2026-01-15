@@ -1,10 +1,31 @@
 const { transformClaudeRequestIn, transformClaudeResponseOut, mapClaudeModelToGemini } = require("../transform/claude");
 const { getMcpSwitchModel } = require("../mcp/mcpSwitchFlag");
+const { isMcpXmlEnabled, getMcpToolNames } = require("../mcp/mcpXmlBridge");
 const {
   prepareMcpContext,
   bufferForMcpSwitchAndMaybeRetry,
   updateSessionAfterResponse,
 } = require("../mcp/claudeApiMcp");
+
+const KNOWN_LOG_LEVELS = new Set([
+  "debug",
+  "info",
+  "success",
+  "warn",
+  "error",
+  "fatal",
+  "request",
+  "response",
+  "upstream",
+  "retry",
+  "account",
+  "quota",
+  "stream",
+]);
+
+function isKnownLogLevel(value) {
+  return typeof value === "string" && KNOWN_LOG_LEVELS.has(value.toLowerCase());
+}
 
 function hasWebSearchTool(claudeReq) {
   return Array.isArray(claudeReq?.tools) && claudeReq.tools.some((tool) => tool?.name === "web_search");
@@ -13,6 +34,11 @@ function hasWebSearchTool(claudeReq) {
 function inferFinalModelForQuota(claudeReq) {
   if (hasWebSearchTool(claudeReq)) return "gemini-2.5-flash";
   return mapClaudeModelToGemini(claudeReq?.model);
+}
+
+function shouldForceStreamForNonStreamingModel(modelName) {
+  const name = String(modelName || "").toLowerCase();
+  return name.includes("claude") || name.includes("gemini-3-pro");
 }
 
 function headersToObject(headers) {
@@ -34,23 +60,36 @@ class ClaudeApi {
     this.sessionMcpState = new Map(); // sessionId -> { lastFamily, mcpStartIndex, foldedSegments: [] }
   }
 
-  log(title, data) {
+  log(levelOrTitle, messageOrData, meta) {
     if (this.logger) {
       if (typeof this.logger.log === "function") {
-        return this.logger.log(title, data);
+        if (isKnownLogLevel(levelOrTitle)) {
+          return this.logger.log(String(levelOrTitle).toLowerCase(), messageOrData, meta);
+        }
+        // Old style: log("Some Title", data) => info("Some Title", data)
+        return this.logger.log("info", String(levelOrTitle), messageOrData);
       }
-      return this.logger(title, data);
+      if (typeof this.logger === "function") {
+        return this.logger(levelOrTitle, messageOrData, meta);
+      }
     }
-    if (data !== undefined && data !== null) {
-      console.log(`[${title}]`, typeof data === "string" ? data : JSON.stringify(data, null, 2));
-    } else {
-      console.log(`[${title}]`);
+
+    // Fallback to console (no structured logger available)
+    const title = String(levelOrTitle);
+    if (meta !== undefined && meta !== null) {
+      console.log(`[${title}]`, messageOrData, meta);
+      return;
     }
+    if (messageOrData !== undefined && messageOrData !== null) {
+      console.log(`[${title}]`, typeof messageOrData === "string" ? messageOrData : JSON.stringify(messageOrData, null, 2));
+      return;
+    }
+    console.log(`[${title}]`);
   }
 
   logDebug(title, data) {
     if (!this.debugRequestResponse) return;
-    this.log("debug", `${title}`, data);
+    this.log("debug", title, data);
   }
 
   logStream(event, options = {}) {
@@ -182,8 +221,7 @@ class ClaudeApi {
 
       this.logDebug("Claude Payload Request", requestData);
 
-      const method = requestData.stream ? "streamGenerateContent" : "generateContent";
-      const queryString = requestData.stream ? "?alt=sse" : "";
+      const clientWantsStream = !!requestData.stream;
 
       const mcpModel = getMcpSwitchModel();
       let baseModel = requestData.model;
@@ -201,6 +239,19 @@ class ClaudeApi {
             mcpModel,
             inferFinalModelForQuota,
           }));
+      }
+
+      const forceStreamForNonStreaming =
+        !clientWantsStream && shouldForceStreamForNonStreamingModel(modelForQuota);
+      const method = clientWantsStream || forceStreamForNonStreaming ? "streamGenerateContent" : "generateContent";
+      const queryString = method === "streamGenerateContent" ? "?alt=sse" : "";
+
+      const transformOutOptions = {};
+      if (mcpModel) transformOutOptions.overrideModel = baseModel;
+      if (!clientWantsStream && method === "streamGenerateContent") transformOutOptions.forceNonStreaming = true;
+      if (isMcpXmlEnabled()) {
+        const names = getMcpToolNames(requestData?.tools);
+        if (names.length > 0) transformOutOptions.mcpXmlToolNames = names;
       }
 
       let loggedTransformed = false;
@@ -227,7 +278,7 @@ class ClaudeApi {
           try {
             if (typeof response.body.tee === "function") {
               const [logBranch, processBranch] = response.body.tee();
-              this.logStreamContent(logBranch, `Upstream Error Raw (Stream, HTTP ${response.status})`);
+              this.logStreamContent(logBranch, `Upstream Error Raw (HTTP ${response.status})`);
               body = processBranch;
             } else {
               const errorText = await response.clone().text().catch(() => "");
@@ -250,7 +301,8 @@ class ClaudeApi {
       if (this.debugRequestResponse && response.body) {
         try {
           const [logBranch, processBranch] = response.body.tee();
-          this.logStreamContent(logBranch, "Gemini Response Raw (Stream)");
+          const rawLabel = method === "streamGenerateContent" ? "Gemini Response Raw (Stream)" : "Gemini Response Raw";
+          this.logStreamContent(logBranch, rawLabel);
           responseForTransform = new Response(processBranch, {
             status: response.status,
             statusText: response.statusText,
@@ -263,7 +315,7 @@ class ClaudeApi {
 
       const convertedResponse = await transformClaudeResponseOut(
         responseForTransform,
-        mcpModel ? { overrideModel: baseModel } : undefined,
+        transformOutOptions,
       );
 
       let finalResponseBody = convertedResponse.body;

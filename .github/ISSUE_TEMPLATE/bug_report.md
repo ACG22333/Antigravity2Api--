@@ -10,6 +10,9 @@ assignees: ''
 **Describe the bug**
 A clear and concise description of what the bug is.
 
+**Which version**
+Software version shown on the page.
+
 **Is MCP enabled?**
 Is MCP enabled? Yes or No. If yes, please specify which MCPs are enabled.
 
